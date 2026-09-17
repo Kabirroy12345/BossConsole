@@ -23,11 +23,17 @@ actual object RunConfigurationManager {
     private val logger = BossLogger.forComponent("RunConfigurationManager")
 
     /**
+     * The production settings path, captured once so [resetForTesting] can restore it without
+     * re-deriving the literal at every call site.
+     */
+    private val defaultSettingsFile = BossDirectories.resolve("run-configurations.json")
+
+    /**
      * Overridable so hermetic tests exercise the real read/write path without touching
      * `~/.boss`. Restored by [resetForTesting] callers; production code never reassigns it.
      */
     @Volatile
-    internal var settingsFile: File = BossDirectories.resolve("run-configurations.json")
+    internal var settingsFile: File = defaultSettingsFile
     private val json =
         Json {
             prettyPrint = true
@@ -95,14 +101,14 @@ actual object RunConfigurationManager {
     }
 
     /**
-     * Reset manager state and optionally redirect [settingsFile] for hermetic unit testing.
-     * Tests must point [settingsFile] back at the real path (and call this again) before
-     * finishing so the singleton is left where the app and other tests expect it.
+     * Reset manager state and optionally redirect [settingsFile] to [testFile]; with no
+     * argument, restore [defaultSettingsFile]. Call only when no mutation is in flight - the
+     * load re-reads [settingsFile] without [settingsMutex] (see [loadSettingsFromFile]) - and
+     * always call with no argument before finishing, so the singleton is left where the app
+     * and other tests expect it.
      */
     internal fun resetForTesting(testFile: File? = null) {
-        if (testFile != null) {
-            settingsFile = testFile
-        }
+        settingsFile = testFile ?: defaultSettingsFile
         _detectedConfigurations.value = emptyList()
         _isScanning.value = false
         _lastError.value = null
@@ -112,11 +118,13 @@ actual object RunConfigurationManager {
     /**
      * Reads a file without changing the manager's state; startup is its production caller.
      *
-     * The optional cleanup write does not hold [settingsMutex]. That is safe only because the
-     * sole production caller runs from the object's init block, where the JVM class-initialisation
-     * lock still serialises every other thread's first use, so no mutator can be in flight.
-     * Any future caller (reload, file watcher, test running alongside the concurrency tests)
-     * must hold [settingsMutex] around the write or it can clobber newer persisted state.
+     * The optional cleanup write does not hold [settingsMutex]. That is safe only because
+     * every current caller runs with no mutation in flight: the production caller runs from
+     * the object's init block, where the JVM class-initialisation lock still serialises every
+     * other thread's first use, and the test caller [resetForTesting] is only ever invoked
+     * between tests (its KDoc states the same precondition).
+     * Any future caller (reload, file watcher) must hold [settingsMutex] around the write or
+     * it can clobber newer persisted state.
      */
     internal fun loadSettingsFromFile(
         file: File,
