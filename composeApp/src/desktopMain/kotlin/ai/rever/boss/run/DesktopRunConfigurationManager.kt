@@ -21,7 +21,13 @@ import java.io.File
  */
 actual object RunConfigurationManager {
     private val logger = BossLogger.forComponent("RunConfigurationManager")
-    private val settingsFile = BossDirectories.resolve("run-configurations.json")
+
+    /**
+     * Overridable so hermetic tests exercise the real read/write path without touching
+     * `~/.boss`. Restored by [resetForTesting] callers; production code never reassigns it.
+     */
+    @Volatile
+    internal var settingsFile: File = BossDirectories.resolve("run-configurations.json")
     private val json =
         Json {
             prettyPrint = true
@@ -58,11 +64,11 @@ actual object RunConfigurationManager {
     }
 
     /**
-     * Load settings synchronously on startup.
+     * Load settings synchronously on startup or test reset.
      * Note: Does NOT auto-select any configuration - user must explicitly select one.
      * Existing configs are deduplicated and names made unique.
      */
-    private fun loadSettingsSync() {
+    internal fun loadSettingsSync() {
         try {
             if (settingsFile.exists()) {
                 val cleanedSettings = loadSettingsFromFile(settingsFile)
@@ -77,12 +83,30 @@ actual object RunConfigurationManager {
                     ),
                 )
             } else {
+                // A missing file is not an error, but a reset must leave the manager empty
+                // rather than whatever a previous load (or test) left behind.
+                _currentSettings.value = RunConfigurationSettings()
                 logger.debug(LogCategory.SYSTEM, "No settings file found, starting with empty configurations")
             }
         } catch (e: Exception) {
             logger.warn(LogCategory.SYSTEM, "Failed to load run settings", error = e)
             _currentSettings.value = RunConfigurationSettings()
         }
+    }
+
+    /**
+     * Reset manager state and optionally redirect [settingsFile] for hermetic unit testing.
+     * Tests must point [settingsFile] back at the real path (and call this again) before
+     * finishing so the singleton is left where the app and other tests expect it.
+     */
+    internal fun resetForTesting(testFile: File? = null) {
+        if (testFile != null) {
+            settingsFile = testFile
+        }
+        _detectedConfigurations.value = emptyList()
+        _isScanning.value = false
+        _lastError.value = null
+        loadSettingsSync()
     }
 
     /**
